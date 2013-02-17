@@ -1,0 +1,139 @@
+#!/usr/bin/perl -w
+
+
+use lib 'lib';
+use Fuse;
+use Fuse::PerlSSH::FS;
+use Getopt::Long;
+use Pod::Usage;
+
+my %options = (
+	'mountpoint'		=> '',
+	'host_port'		=> 22,
+	'host_root'		=> '/',
+	'debug'			=> 0,
+	'help'			=> 0,
+);
+
+Getopt::Long::Configure('no_ignore_case');
+GetOptions(
+	'mountpoint|m:s'	=> \$options{'mountpoint'},
+	'port|p:s'		=> \$options{'host_port'},
+	'login|l:s'		=> \$options{'host_user'},
+	'debug|D+'		=> \$options{'debug'},
+	'help'			=> \$options{'help'},
+) or pod2usage(2);
+
+$options{'host'} ||= shift @ARGV;
+$options{'mountpoint'} ||= shift @ARGV;
+
+pod2usage(1) unless !$options{'help'} && $options{'mountpoint'};
+
+if($options{host} =~ /\@/){
+	($options{host_user},$options{host}) = split(/\@/,$options{host});
+}
+if($options{host} =~ /\:/){
+	($options{host},$options{host_root}) = split(/\:/,$options{host});
+}
+
+if(-d $options{'mountpoint'}){
+	opendir(my $dh, $options{'mountpoint'});
+	my @entries = readdir($dh);
+	if( @entries > 2 ){
+		die "perlsshfs: Mountpoint $options{'mountpoint'} exist and is not empty! (\"-o nonempty\" not yet implemented.)\n";
+	}
+	closedir($dh);
+}
+
+my $mountpoint_created;
+if(!-d $options{'mountpoint'}){
+	print "perlsshfs: Creating mountpoint directory $options{'mountpoint'}\n";
+	mkdir($options{'mountpoint'}) or die "Error creating mountpoint dir: $!\n";
+	$mountpoint_created=1;
+}
+
+## init TagLayer
+my $fpfs = Fuse::PerlSSH::FS->new(
+	host		=> $options{'host'},
+	user		=> $options{'host_user'},
+	port		=> $options{'host_port'},
+	root		=> $options{'host_root'},
+	mountpoint	=> $options{'mountpoint'},
+	debug		=> $options{'debug'},
+);
+
+
+print "perlsshfs: Mounting remote host $options{host}:$options{host_root} via ssh at $options{mountpoint}\n\n" if $options{debug};
+$fpfs->mount(); # blocks
+
+
+$fpfs->umount();
+
+if($mountpoint_created){
+	print "perlsshfs: Removing previously created mountpoint directory $options{'mountpoint'}\n";
+	rmdir($options{'mountpoint'}) or die "Error removing previously created mountpoint dir: $!\n";
+}
+
+
+__END__
+
+=head1 NAME
+
+perlsshfs - mounting script for Fuse::PerlSSH::FS
+
+=head1 SYNOPSIS
+
+  perlsshfs [user@]host:[dir] mountpoint [options]
+
+=head1 EXAMPLES
+
+  perlsshfs user@example.com:/home/user /mnt/remote -p 12345 --debug
+  perlsshfs example.com:/home/user /mnt/remote
+
+=head1 OPTIONS
+
+=over
+
+=item B<--login, -l>
+
+Username to use for the SSH login. You can choose between supplying the username
+as part of the host string (with "at", @) or by using this option switch.
+
+=item B<--mountpoint, -m>
+
+Location where to mount the remote filesystem via perlsshfs. You can choose between
+supplying the mountpoint as the second argument or by using this option switch.
+
+=item B<--port, -p>
+
+You can specify a different SSH port, if needed. Defaults to 22.
+
+=item B<--debug, -D>
+
+Switch on debugging output. Incremental. You can repeat this option up to two times.
+1x means debug output from Fuse::PerlSSH::FS, 2x adds the debug messages from Fuse.
+
+=item B<--help, -h>
+
+Output this help text.
+
+=back
+
+Please note that this script currently blocks (will remain in the foreground) until
+the mount is unmounted with I<sudo umount mountpoint>.
+
+=head1 SEE ALSO
+
+More information about what this mounting script does can be found in the
+documentation of the backend module L<Fuse::PerlSSH::FS>.
+
+=head1 AUTHOR
+
+Clipland GmbH L<http://www.clipland.com/>
+
+=head1 COPYRIGHT & LICENSE
+
+Copyright 2012-2013 Clipland GmbH. All rights reserved.
+
+This library is free software, dual-licensed under L<GPLv3|http://www.gnu.org/licenses/gpl>/L<AL2|http://opensource.org/licenses/Artistic-2.0>.
+You can redistribute it and/or modify it under the same terms as Perl itself.
