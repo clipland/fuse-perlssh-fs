@@ -1,6 +1,7 @@
 MANIFEST
 LICENSE
 README
+Changes
 Makefile.PL
 lib/Fuse/PerlSSH/FS.pm
 lib/Fuse/PerlSSH/RemoteFunctions.pm
