@@ -14,13 +14,15 @@ WriteMakefile(
 		'Fuse'		=> '0.14',
 		'File::ExtAttr'	=> '1.09',
 		'IPC::PerlSSH'	=> '0.16',
-		'Test::Virtual::Filesystem'	=> 0,
 		'Getopt::Long'	=> 0,
 		'Pod::Usage'	=> 0,
-		'Carp'		=> 0,
 		'Data::Dumper'	=> 0,
+		'Daemon::Daemonize'	=> 0,
 		'Fcntl'		=> 0,
 		'POSIX'		=> 0,
+	},
+	BUILD_REQUIRES	=> {
+		'Test::Virtual::Filesystem'	=> 0,
 	},
 	EXE_FILES	=> [
 		'bin/perlsshfs'

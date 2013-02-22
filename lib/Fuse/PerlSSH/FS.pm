@@ -4,13 +4,12 @@ use strict;
 use warnings;
 
 use Data::Dumper;
-use Carp ();
 use IPC::PerlSSH;
 use Fuse ':xattr';
 use POSIX qw(ENOENT ENOSYS EEXIST EPERM O_RDONLY O_RDWR O_APPEND O_CREAT EOPNOTSUPP);
 use Fcntl qw(S_ISBLK S_ISCHR S_ISFIFO SEEK_SET);
 
-our $VERSION = '0.10';
+our $VERSION = '0.11';
 our $self;
 
 sub new {
@@ -25,22 +24,31 @@ sub new {
 		@_
 	}, $class);
 
-	Carp::croak("Options to Fuse::PerlSSH::FS should be key/value pairs passed in as a hash (got an odd number of elements)") if @_ % 2 != 0;
-	Carp::croak("Fuse::PerlSSH::FS needs a host to work") if !$self->{host};
-	Carp::croak("Fuse::PerlSSH::FS only accepts password interactively!") if $self->{password};
+	die "Options to Fuse::PerlSSH::FS should be key/value pairs passed in as a hash (got an odd number of elements)" if @_ % 2 != 0;
+	die "Fuse::PerlSSH::FS needs a host to work" if !$self->{host};
+	die "Fuse::PerlSSH::FS only accepts password interactively!" if $self->{password};
 
 	$self->{root} = '/' if !$self->{root};
 	chop($self->{root}) if length($self->{root}) > 1 && $self->{root} =~ /\/$/;	# chop trailing slashes
 
-	print '## Fuse::PerlSSH::FS::self'.Dumper($self) if $self->{debug};
+	print STDERR '## Fuse::PerlSSH::FS::self'.Dumper($self) if $self->{debug};
 
 	## setup ssh connection to remote host
 	$self->_remote();
 
-	my %rval;
-	eval { %rval = $self->_remote->call("test_capabilities"); };
-	Carp::croak("Fuse::PerlSSH::FS connection failed!") if $@;
-	print "## new: test_capabilities: ".Dumper(\%rval) if $self->{debug};
+	## test remote capabilities
+	eval { %{$self->{capabilities}} = $self->_remote->call("test_capabilities",$self->{root}); };
+	die "Fuse::PerlSSH::FS capabilities test failed! $@" if $@;
+	unless($self->{capabilities}->{can_xattr}){
+		my $testfile = '/perlsshfs-xattr-test-'.time();
+		my $mknod = local_mknod($testfile, 33204,0);
+		my $setxattr = local_setxattr($testfile, 'user.abc','123',0);
+		my $val = local_getxattr($testfile, 'user.abc');
+		my $unlink = local_unlink($testfile, 'user.abc');
+		$self->{capabilities}->{can_xattr} = 2 if $val eq '123';
+		print STDERR "## test_capabilities xattr with testfile: mknod:$mknod, setxattr:$setxattr, val:$val, unlink:$unlink \n" if $self->{debug};
+	}
+	print STDERR "## new: test_capabilities: ".Dumper($self->{capabilities}) if $self->{debug};
 
 	return $self;
 }
@@ -55,9 +63,18 @@ sub _remote {
 			$self->{ssh}->store(
 				test_connection => q{ return "HELO"; },
 				test_capabilities => q{
+					my $root = shift;
+
 					eval { require File::ExtAttr; };
-					my $xattr_module = $@ ? $@ : 0;
-					return ('remote_perl_version', $], 'xattr_module', $xattr_module);
+					my $xattr_module = $@ ? $@ : 1;
+
+					eval { require Filesys::DfPortable; };
+					my $dfportable_module = $@ ? $@ : 1;
+
+					my @mount = `mount`;
+					my $can_xattr = 1 if $mount[0] =~ /,user_xattr/;
+
+					return ('remote_perl_version', $], 'xattr_module', $xattr_module, 'dfportable_module', $dfportable_module, 'can_xattr', $can_xattr);
 				},
 			#	remote_mknod    => q{ require 'syscall.ph'; syscall(&SYS_mknod,$_[0],$_[1],$_[2]); },	# creates unusable socket files! (probably a problem with dec vs. oct mode, todo: lookup what the syscall requires..)
 				remote_mknod    => q{	# todo: replace with Unix::Mknod
@@ -79,7 +96,22 @@ sub _remote {
 					my @ents = readdir($dh);
 					return @ents;
 				},
-				statfs	=> q{ return (255,1000000,500000,1000000,500000,4096); }, # a pseudo statfs
+				statfs	=> q{
+					# @_ = (root,method)
+					my ($blocks,$bavail) = (10000000,5000000);
+					if($_[1] eq 'dfportable'){
+						my $df = dfportable($_[0]);
+						$blocks = $df->{blocks} if defined($df);
+						$bavail = $df->{bavail} if defined($df);
+					}elsif($_[1] eq 'df'){
+						my @df = `df $_[0]`;
+						(my $fsystem,$blocks,my $bused,$bavail,my $capacity,my $mounted) = split(/\s+/,$df[1]);
+						$blocks = $blocks if $df[1];
+						$bavail = $bavail if $df[1];
+					}
+
+					return (255,1000000,500000,$blocks,$bavail,1024);
+				}, # a pseudo statfs
 				remote_listxattr => q{
 					use File::ExtAttr;
 					my @list = File::ExtAttr::listfattr($_[0]) or die "Cannot listfattr('$_[0]') - $!";
@@ -116,10 +148,10 @@ sub _remote {
 
 			my $rval;
 			eval { $rval = $self->_remote->call("test_connection"); };
-			Carp::croak("Fuse::PerlSSH::FS ssh connection not working!") if $@;
-			print "## _remote: test_connection: ".Dumper($rval) if $self->{debug};
+			die "Fuse::PerlSSH::FS ssh connection not working!" if $@;
+			print STDERR "## _remote: test_connection: ".Dumper($rval) if $self->{debug};
 		}else{
-			Carp::croak("Fuse::PerlSSH::FS was not able to log in to host $self->{host} on port $self->{port} with user $self->{user}");
+			die "Fuse::PerlSSH::FS was not able to log in to host $self->{host} on port $self->{port} with user $self->{user}";
 			return undef;
 		}
 	}
@@ -135,7 +167,21 @@ sub mount {
 		die 'Fuse::PerlSSH::FS: Mountpoint '.$self->{mountpoint}.' does not exists!';
 	}
 
-	Fuse::main(
+	my %add_xattr;
+	if($self->{no_xattr}){
+		print STDERR "## mount: xattr bindings omitted. --no-xattr option in effect.\n" if $self->{debug};
+	}elsif(!$self->{capabilities}->{can_xattr}){
+		print STDERR "## mount: xattr bindings omitted. Remote host seems to be incapable.\n" if $self->{debug};
+	}else{
+		%add_xattr = (
+			listxattr=> \&local_listxattr,
+			getxattr => \&local_getxattr,
+			setxattr => \&local_setxattr,
+			removexattr=>\&local_removexattr,
+		);
+	}
+
+	my %fuse = (
 		mountpoint => $self->{mountpoint},
 		threaded   => $self->{threaded} ? 1 : 0,
 		debug	   => $self->{debug} > 1 ? 1 : 0,
@@ -158,17 +204,16 @@ sub mount {
 		truncate => \&local_truncate,
 		ftruncate=> \&local_ftruncate,
 		statfs	 => \&local_statfs,
-		listxattr=> \&local_listxattr,
-		getxattr => \&local_getxattr,
-		setxattr => \&local_setxattr,
-		removexattr=>\&local_removexattr,
+		%add_xattr
 	);
+
+	Fuse::main( %fuse );
 	return;
 }
 
 sub umount {
 	my $self = shift;
-	print "## umount: sending 'exit'\n" if $self->{debug};
+	print STDERR "## umount: sending 'exit'\n" if $self->{debug};
 	eval { 	$self->_remote->eval('exit 1'); };
 }
 
@@ -179,7 +224,7 @@ sub path {
 
 sub local_readdir {
 	my $path = path(shift);
-	print "## local_readdir: $path \n" if $self->{debug};
+	print STDERR "## local_readdir: $path \n" if $self->{debug};
 
 	my @dir;
 	eval { 	@dir = _remote->call("remote_readdir", $path ); };
@@ -190,7 +235,7 @@ sub local_readdir {
 
 sub local_getattr {
 	my $path = path(shift);
-	print "## local_getattr: $path \n" if $self->{debug};
+	print STDERR "## local_getattr: $path \n" if $self->{debug};
 
 	## Fuse-perl docs say "FIXME: the "ino" field is currently ignored. I tried setting it to 0 in an example script, which consistently caused segfaults."
 	## $stat[1] = 0; # in case we get segfaults
@@ -211,7 +256,7 @@ sub local_mkdir {
 	## pass the "mode as modified by umask"
 #	$mode &= ~$self->{umask} if defined $mode;
 
-	print "## local_mkdir: $path perm:decimal($mode),octal(".sprintf("%o", $mode).")\n" if $self->{debug};
+	print STDERR "## local_mkdir: $path perm:decimal($mode),octal(".sprintf("%o", $mode).")\n" if $self->{debug};
 
 	my $result;
 	eval { $result = _remote->call("remote_mkdir", $path, $mode ); };
@@ -226,7 +271,7 @@ sub local_mknod {
 	my $path = path(shift);
 	my $mode = shift;
 	my $dev = shift;
-	print "## local_mknod: $path perm:decimal($mode),octal(".sprintf("%o", $mode)."), dev:$dev\n" if $self->{debug};
+	print STDERR "## local_mknod: $path perm:decimal($mode),octal(".sprintf("%o", $mode)."), dev:$dev\n" if $self->{debug};
 
 	# from Fuse::PDF: don't support special files
 #	my $is_special = !S_ISREG($mode) && !S_ISDIR($mode) && !S_ISLNK($mode);
@@ -251,7 +296,7 @@ sub local_mknod {
 ## Called to remove a directory.
 sub local_rmdir {
 	my $path = path(shift);
-	print "## local_rmdir: $path\n" if $self->{debug};
+	print STDERR "## local_rmdir: $path\n" if $self->{debug};
 
 	my $result;
 	eval { $result = _remote->call("rmdir", $path ); };
@@ -265,7 +310,7 @@ sub local_rmdir {
 sub local_rename {
 	my $path = path(shift);
 	my $newpath = path(shift);
-	print "## local_rename: $path -> $newpath\n" if $self->{debug};
+	print STDERR "## local_rename: $path -> $newpath\n" if $self->{debug};
 
 	my $result;
 	eval { $result = _remote->call("rename", $path, $newpath ); };
@@ -279,7 +324,7 @@ sub local_rename {
 ## Called to remove a file, device, or symlink.
 sub local_unlink {
 	my $path = path(shift);
-	print "## local_unlink: $path\n" if $self->{debug};
+	print STDERR "## local_unlink: $path\n" if $self->{debug};
 
 	my $result;
 	eval { $result = _remote->call("unlink", $path ); };
@@ -291,14 +336,14 @@ sub local_unlink {
 sub local_open {
 	my $path = path(shift);
 	my $mode = shift;
-	print "## local_open: $path mode:$mode," if $self->{debug};
+	print STDERR "## local_open: $path mode:$mode," if $self->{debug};
 
 	my $fd;
 	eval { $fd = _remote->call("sysopen", $mode, $path ); };
-	print " fd:$fd\n" if $self->{debug};
+	print STDERR " fd:$fd\n" if $self->{debug};
 
 	if($@){
-		print "##  local_open: remote_sysopen failed: $@\n" if $self->{debug};
+		print STDERR "##  local_open: remote_sysopen failed: $@\n" if $self->{debug};
 		return -ENOENT();
 	}
 
@@ -312,7 +357,7 @@ sub local_open {
 sub local_read {
 	my ($path,$length,$offset,$fd) = @_;
 	$path = path(shift);
-	print "## local_read: $path length:$length, offset:$offset, fd:$fd\n" if $self->{debug};
+	print STDERR "## local_read: $path length:$length, offset:$offset, fd:$fd\n" if $self->{debug};
 
 	return -ENOENT() unless $fd;	# as good as checking if the file exists, no handle, no file
 
@@ -336,7 +381,7 @@ sub local_read {
 sub local_write {
 	my ($path,$buf,$offset,$fd) = @_;
 	$path = path(shift);
-	print "## local_write: $path buf-length:".length($buf).", offset:$offset, fd:$fd\n" if $self->{debug};
+	print STDERR "## local_write: $path buf-length:".length($buf).", offset:$offset, fd:$fd\n" if $self->{debug};
 
 	return -ENOSYS() unless $fd;	# as good as checking if the file exists, no handle, no file
 
@@ -345,7 +390,7 @@ sub local_write {
 	eval { $newpos = _remote->call( "seek", $fd, $offset, SEEK_SET); };
 
 	if($@){
-		print "##  local_write: seek failed: $@\n" if $self->{debug};
+		print STDERR "##  local_write: seek failed: $@\n" if $self->{debug};
 		return -ENOSYS();
 		# return -ENOSYS() unless $newpos; # call->("seek" should return the tell() value/newpos, but so far this was always '' or undef or so, but no value!
 	}
@@ -353,7 +398,7 @@ sub local_write {
 	# write sadly does not return how many bytes were written
 	eval { _remote->call( "write", $fd, $buf ) };
 	if($@){
-		print "##  local_write: write failed: $@\n" if $self->{debug};
+		print STDERR "##  local_write: write failed: $@\n" if $self->{debug};
 		return -ENOSYS();
 	}
 
@@ -367,7 +412,7 @@ sub local_release {
 	my $mode = shift;
 	my $fd = shift;
 
-	print "## local_release: $path mode:$mode, fd:$fd\n" if $self->{debug};
+	print STDERR "## local_release: $path mode:$mode, fd:$fd\n" if $self->{debug};
 
 	return -ENOSYS() unless $fd;
 
@@ -385,7 +430,7 @@ sub local_release {
 sub local_symlink {
 	my $path = path(shift);
 	my $sympath = path(shift);
-	print "## local_symlink: $path -> $sympath\n" if $self->{debug};
+	print STDERR "## local_symlink: $path -> $sympath\n" if $self->{debug};
 
 	my $result;
 	eval { $result = _remote->call("symlink", $path, $sympath ); };
@@ -399,7 +444,7 @@ sub local_symlink {
 sub local_link {
 	my $path = path(shift);
 	my $linkpath = path(shift);
-	print "## local_link: $path -> $linkpath\n" if $self->{debug};
+	print STDERR "## local_link: $path -> $linkpath\n" if $self->{debug};
 
 	my $result;
 	eval { $result = _remote->call("remote_link", $path, $linkpath ); };
@@ -412,7 +457,7 @@ sub local_link {
 ## This is called when dereferencing symbolic links, to learn the target.
 sub local_readlink {
 	my $path = path(shift);
-	print "## local_readlink: $path\n" if $self->{debug};
+	print STDERR "## local_readlink: $path\n" if $self->{debug};
 
 	my $result;
 	eval { $result = _remote->call("readlink", $path ); };
@@ -427,7 +472,7 @@ sub local_utime {
 	## arg order is reversed between perl (path(s) last, and what is passed-in here (path first), probably because the perl way is not atomic as it may die after a few files, and the fuse way makes it atomic: one file at a time
 	my $path = path(shift);
 	my ($atime,$mtime) = (shift,shift);
-	print "## local_utime: $path atime:$atime,mtime:$mtime\n" if $self->{debug};
+	print STDERR "## local_utime: $path atime:$atime,mtime:$mtime\n" if $self->{debug};
 
 	my $result;
 	eval { $result = _remote->call("utime", $atime, $mtime, $path ); };
@@ -439,7 +484,7 @@ sub local_utime {
 sub local_truncate {
 	my $path = path(shift);
 	my $offset = shift;
-	print "## local_truncate: $path offset:$offset\n" if $self->{debug};
+	print STDERR "## local_truncate: $path offset:$offset\n" if $self->{debug};
 
 	my $result;
 	eval { $result = _remote->call("remote_truncate", $path, $offset ); };
@@ -455,7 +500,7 @@ sub local_ftruncate {
 	my $path = path(shift);
 	my $offset = shift;
 	my $fd = shift;
-	print "## local_ftruncate: $path offset:$offset, fd:$fd\n" if $self->{debug};
+	print STDERR "## local_ftruncate: $path offset:$offset, fd:$fd\n" if $self->{debug};
 
 	my $result;
 	eval { $result = _remote->call("truncate", $fd, $offset ); };	# as PerlSSH's truncate *only* operates on filehandles, resolved via fd, it's effectively a ftruncate() (see FUSE docs for that)
@@ -470,8 +515,11 @@ sub local_ftruncate {
 ## or -ENOANO(), $namelen, $files, $files_free, $blocks, $blocks_avail, $blocksize
 sub local_statfs {
 	my @statfs;
-	eval { @statfs = _remote->call("statfs" ); };
-	print "## statfs @statfs\n" if $self->{debug};
+
+	my $method = $self->{capabilities}->{dfportable_module} eq 1 ? 'dfportable' : 'df';
+
+	eval { @statfs = _remote->call("statfs", $self->{root}, $method ); };
+	print STDERR "## local_statfs root:$self->{root}, method:$method, (@statfs)\n" if $self->{debug};
 
 	return -ENOENT() if $@;
 	return @statfs;
@@ -479,13 +527,13 @@ sub local_statfs {
 
 sub local_listxattr {
 	my $path = path(shift);
-	print "## listxattr: $path \n" if $self->{debug};
+	print STDERR "## listxattr: $path \n" if $self->{debug};
 
 	my @list;
 	eval { @list = _remote->call("remote_listxattr", $path ); };
 	return -ENOENT() if $@;
 
-	print "##  listxattr: list:@list\n" if $self->{debug};
+	print STDERR "##  local_listxattr: list:@list\n" if $self->{debug};
 
 	return @list ? (@list, 0) : 0;
 }
@@ -493,15 +541,15 @@ sub local_listxattr {
 sub local_getxattr {
 	my $path = path(shift);
 	my $key = shift;
-	print "## getxattr: $path key:$key\n" if $self->{debug};
+	print STDERR "## local_getxattr: $path key:$key\n" if $self->{debug};
 
 	my $val;
 	eval { $val = _remote->call("remote_getxattr", $path, $key ); };
-	print "##  getxattr: eval:$@ \n" if $self->{debug};
+	print STDERR "##  local_getxattr: eval:$@ \n" if $self->{debug};
 	return -EOPNOTSUPP() if $@ =~ / no namespace /;
 	return -ENOSYS() if $@;
 
-	print "##  getxattr: ".$key."=".($val||'<undef>')." \n" if $self->{debug};
+	print STDERR "##  local_getxattr: ".$key."=".($val||'<undef>')." \n" if $self->{debug};
 
 	return $val ? $val : 0;
 }
@@ -511,11 +559,11 @@ sub local_setxattr {
 	my $key = shift;
 	my $val = shift;
 	my $create_replace = shift;
-	print "## setxattr: $path key:$key, val:$val, create|replace:$create_replace\n" if $self->{debug};
+	print STDERR "## local_setxattr: $path key:$key, val:$val, create|replace:$create_replace\n" if $self->{debug};
 
 	my $ret;
 	eval { $ret = _remote->call("remote_setxattr", $path, $key, $val, $create_replace ); };
-	print "##  setxattr: ret:".($ret||'<undef>').", eval:$@ \n" if $self->{debug};
+	print STDERR "##  local_setxattr: ret:".($ret||'<undef>').", eval:$@ \n" if $self->{debug};
 	return -EOPNOTSUPP() if $@ =~ / no namespace /;	# we force the user only to supply a namespace
 #	return -EEXIST() if !defined($ret);	# If flags is set to XATTR_CREATE and the extended attribute already exists, this should fail with - EEXIST.
 #	return -ENOATTR() if $@ =~ / no data available/;	# If flags is set to XATTR_REPLACE and the extended attribute doesn't exist, this should fail with - ENOATTR.
@@ -528,11 +576,11 @@ sub local_setxattr {
 sub local_removexattr {
 	my $path = path(shift);
 	my $key = shift;
-	print "## removexattr: $path key:$key\n" if $self->{debug};
+	print STDERR "## local_removexattr: $path key:$key\n" if $self->{debug};
 
 	my ($ret,$err);
 	eval { ($ret,$err) = _remote->call("remote_removexattr", $path, $key ); };
-	print "##  removexattr: ret:".($ret||'<undef>').", eval:$@ \n" if $self->{debug};
+	print STDERR "##  local_removexattr: ret:".($ret||'<undef>').", eval:$@ \n" if $self->{debug};
 	return -EOPNOTSUPP() if $@ =~ / no namespace /;
 	return -ENOSYS() if $@;
 
