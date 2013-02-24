@@ -1,5 +1,9 @@
 Revision history for Fuse::PerlSSH::FS
 
+0.12	2013-02-24
+	- daemonizing is buggy, so foreground operation
+	  is forced for now
+
 0.11	2013-02-22
 	- Changes file
 	- perlssh can now print version information

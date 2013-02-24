@@ -9,7 +9,7 @@ use Fuse ':xattr';
 use POSIX qw(ENOENT ENOSYS EEXIST EPERM O_RDONLY O_RDWR O_APPEND O_CREAT EOPNOTSUPP);
 use Fcntl qw(S_ISBLK S_ISCHR S_ISFIFO SEEK_SET);
 
-our $VERSION = '0.11';
+our $VERSION = '0.12';
 our $self;
 
 sub new {
