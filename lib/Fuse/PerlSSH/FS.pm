@@ -7,9 +7,9 @@ use Data::Dumper;
 use IPC::PerlSSH;
 use Fuse ':xattr';
 use POSIX qw(ENOENT ENOSYS EEXIST EPERM O_RDONLY O_RDWR O_APPEND O_CREAT EOPNOTSUPP);
-use Fcntl qw(S_ISBLK S_ISCHR S_ISFIFO SEEK_SET);
+use Fcntl qw(S_ISBLK S_ISCHR S_ISFIFO);
 
-our $VERSION = '0.12';
+our $VERSION = '0.13';
 our $self;
 
 sub new {
@@ -143,7 +143,7 @@ sub _remote {
 					File::ExtAttr::delfattr($_[0], $key, { namespace => $ns }) or die "Cannot delfattr('$_[0]','$_[1]') - $!";
 				},
 			);
-			$self->{ssh}->use_library('FS', qw( readdir chown chmod lstat readlink rename rmdir symlink unlink utime ) );
+			$self->{ssh}->use_library('FS', qw( chown chmod lstat readlink rename rmdir symlink unlink utime ) );
 			$self->{ssh}->use_library('Fuse::PerlSSH::RemoteFunctions');
 
 			my $rval;
@@ -336,6 +336,7 @@ sub local_unlink {
 sub local_open {
 	my $path = path(shift);
 	my $mode = shift;
+#	my $fileinfo = shift;
 	print STDERR "## local_open: $path mode:$mode," if $self->{debug};
 
 	my $fd;
@@ -361,19 +362,11 @@ sub local_read {
 
 	return -ENOENT() unless $fd;	# as good as checking if the file exists, no handle, no file
 
-	## PerlSSH: "Seek to the given position in the remote filehandle and return the new position."
-	my $newpos;
-	eval { $newpos = _remote->call( "seek", $fd, $offset, SEEK_SET); };
-
-	return -ENOSYS() if $@;	#  # ENOSYS = "operation not supported"
-	# return -ENOSYS() unless $newpos; # call->("seek" should return the tell() value/newpos, but so far this was always '' or undef or so, but no value!
-
-	## PerlSSH: "Perform a single read call on a remote filehandle. Returns empty string on EOF."
-	my $rv = -ENOSYS();	# init return_value with an error, in case we can't fill it with data
-	eval { $rv = _remote->call("read", $fd, $length ); };
+	my $buf = -ENOSYS();	# init return_value with an error, in case we can't fill it with data
+	eval { $buf = _remote->call("read", $fd, $length, $offset ); };
 
 	return -ENOSYS() if $@;
-	return $rv;
+	return $buf;
 }
 
 ## Arguments: Pathname, scalar buffer, numeric offset, file handle. You can use length($buffer) to find the buffersize. Returns length($buffer) if successful (number of bytes written).
@@ -385,18 +378,8 @@ sub local_write {
 
 	return -ENOSYS() unless $fd;	# as good as checking if the file exists, no handle, no file
 
-	## PerlSSH: "Seek to the given position in the remote filehandle and return the new position."
-	my $newpos;
-	eval { $newpos = _remote->call( "seek", $fd, $offset, SEEK_SET); };
-
-	if($@){
-		print STDERR "##  local_write: seek failed: $@\n" if $self->{debug};
-		return -ENOSYS();
-		# return -ENOSYS() unless $newpos; # call->("seek" should return the tell() value/newpos, but so far this was always '' or undef or so, but no value!
-	}
-
 	# write sadly does not return how many bytes were written
-	eval { _remote->call( "write", $fd, $buf ) };
+	eval { _remote->call( "write", $fd, $buf, $offset ) };
 	if($@){
 		print STDERR "##  local_write: write failed: $@\n" if $self->{debug};
 		return -ENOSYS();
@@ -428,9 +411,9 @@ sub local_release {
 ## Arguments: Existing filename, symlink name. Returns an errno.
 ## Called to create a symbolic link.
 sub local_symlink {
-	my $path = path(shift);
+	my $path = shift;
 	my $sympath = path(shift);
-	print STDERR "## local_symlink: $path -> $sympath\n" if $self->{debug};
+	print STDERR "## local_symlink: $path <- $sympath\n" if $self->{debug};
 
 	my $result;
 	eval { $result = _remote->call("symlink", $path, $sympath ); };
@@ -450,7 +433,7 @@ sub local_link {
 	eval { $result = _remote->call("remote_link", $path, $linkpath ); };
 
 	return -ENOENT() if $@;
-	return $result ? 0 : -$!;
+	return $result ? 0 : -EEXIST(); # if link fails, most probably, because it exists
 }
 
 ## Arguments: link pathname. Returns a scalar: either a numeric constant, or a text string.
@@ -463,7 +446,7 @@ sub local_readlink {
 	eval { $result = _remote->call("readlink", $path ); };
 
 	return -ENOENT() if $@;
-	return $result ? 0 : -$!;
+	return $result ? $result : -$!;
 }
 
 ## Arguments: Pathname, numeric actime, numeric modtime. Returns an errno.
@@ -694,11 +677,6 @@ FUSE implementations on NetBSD and FreeBSD do not support xattr, for example.
 
 Currently, there's no keep-alive mechanism and the automatic reconnect generally fails.
 So the mount might become unresponsive after a certain time of inactivity.
-
-=head2 Links and symlinks
-
-Symlinks and hardlinks are not working. The FUSE I<-o> options I<transform_symlinks> and
-I<follow_symlinks> are on the todo list.
 
 =head1 SEE ALSO
 

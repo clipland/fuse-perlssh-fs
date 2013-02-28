@@ -41,25 +41,22 @@ func close => q{
    undef $handles{shift()};
 };
 
+# second arg to seek is WHENCE, 0 is for SEEK_SET
 func read => q{
-   my $fh = get_handle( shift );
-   defined( $fh->read( my $data, $_[0] ) ) or die "Cannot read() - $!\n";
-   return $data;
+	my $fh = get_handle( shift );
+	$fh->seek($_[1], 0) or die "Cannot seek() in read() - $!\n";
+	defined( $fh->read( my $buf, $_[0] ) ) or die "Cannot read() - $!\n";
+	return $buf;
 };
 
 func write => q{
-   my $fh = get_handle( shift );
-   defined( $fh->print( $_[0] ) ) or die "Cannot write() - $!\n";
+	my $fh = get_handle( shift );
+	$fh->seek($_[1], 0) or die "Cannot seek() in write() - $!\n";
+	defined( $fh->print( $_[0] ) ) or die "Cannot write() - $!\n";
 };
 
 func tell => q{
    my $fh = get_handle( shift );
-   return tell($fh);
-};
-
-func seek => q{
-   my $fh = get_handle( shift );
-   seek( $fh, $_[0], $_[1] ) or die "Cannot seek() - $!\n";
    return tell($fh);
 };
 

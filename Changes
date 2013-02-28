@@ -1,5 +1,11 @@
 Revision history for Fuse::PerlSSH::FS
 
+0.13	2013-02-28
+	- Fixed symlink() and readlink()
+	- Moved seek()s to RemoteFunctions to reduce the number
+	  of network round-trips per read/write
+	- Removed seek from RemoteFunctions
+
 0.12	2013-02-24
 	- daemonizing is buggy, so foreground operation
 	  is forced for now
